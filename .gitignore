@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.data/
+.playwright-cli/
+tests/__pycache__/
+output/
+.release/
+desktop/bin/
+desktop/obj/
+desktop/publish/
+*.log
+*.partial.*
+*.uploading

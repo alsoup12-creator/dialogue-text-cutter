@@ -1,0 +1,253 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Http.Json;
+using System.Net.Sockets;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+
+namespace TextCut.Desktop;
+
+internal static class Program
+{
+    [STAThread]
+    private static void Main()
+    {
+        using var singleInstance = new Mutex(true, "Local\\TextCutDesktop-6D3CB15B", out var createdNew);
+        if (!createdNew)
+        {
+            MessageBox.Show("对白剪辑台已经在运行。", "对白剪辑台", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        ApplicationConfiguration.Initialize();
+        Application.Run(new MainForm());
+    }
+}
+
+internal sealed class MainForm : Form
+{
+    private readonly WebView2 _webView = new() { Dock = DockStyle.Fill };
+    private readonly Panel _loadingPanel = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(245, 242, 234) };
+    private readonly Label _loadingLabel = new()
+    {
+        AutoSize = false,
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleCenter,
+        Font = new Font("微软雅黑", 15F),
+        ForeColor = Color.FromArgb(31, 83, 68),
+        Text = "正在启动对白剪辑台…"
+    };
+
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
+    private Process? _backend;
+    private string? _backendUrl;
+    private string? _desktopToken;
+    private string? _appRoot;
+    private bool _allowClose;
+    private bool _closeInProgress;
+
+    public MainForm()
+    {
+        Text = "对白剪辑台";
+        StartPosition = FormStartPosition.CenterScreen;
+        Width = 1500;
+        Height = 920;
+        MinimumSize = new Size(1040, 700);
+        BackColor = _loadingPanel.BackColor;
+        _loadingPanel.Controls.Add(_loadingLabel);
+        Controls.Add(_webView);
+        Controls.Add(_loadingPanel);
+        _loadingPanel.BringToFront();
+        Shown += async (_, _) => await StartAsync();
+        FormClosing += OnFormClosing;
+    }
+
+    private async Task StartAsync()
+    {
+        try
+        {
+            _appRoot = FindAppRoot();
+            var port = GetAvailablePort();
+            _backendUrl = $"http://127.0.0.1:{port}";
+            _desktopToken = Guid.NewGuid().ToString("N");
+            StartBackend(_appRoot, port, _desktopToken);
+            await WaitForBackendAsync(_backendUrl);
+            await InitializeWebViewAsync(_appRoot, _backendUrl);
+            _loadingPanel.Visible = false;
+            _webView.Focus();
+        }
+        catch (Exception exception)
+        {
+            _loadingLabel.Text = "启动失败\r\n\r\n" + exception.Message + "\r\n\r\n请将此界面截图发给 Codex。";
+            _loadingLabel.ForeColor = Color.FromArgb(174, 68, 50);
+        }
+    }
+
+    private static string FindAppRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var depth = 0; depth < 8 && current is not null; depth++, current = current.Parent)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "app.py")) && Directory.Exists(Path.Combine(current.FullName, "static")))
+                return current.FullName;
+        }
+        throw new DirectoryNotFoundException("找不到 app.py 和 static 目录。请不要单独移动桌面端 EXE。");
+    }
+
+    private void StartBackend(string appRoot, int port, string token)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "python",
+            WorkingDirectory = appRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add(Path.Combine(appRoot, "app.py"));
+        startInfo.ArgumentList.Add("--host");
+        startInfo.ArgumentList.Add("127.0.0.1");
+        startInfo.ArgumentList.Add("--port");
+        startInfo.ArgumentList.Add(port.ToString());
+        startInfo.Environment["TEXTCUT_SKIP_BROWSER"] = "1";
+        startInfo.Environment["TEXTCUT_DESKTOP_TOKEN"] = token;
+
+        _backend = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        _backend.OutputDataReceived += (_, eventArgs) => AppendLog(eventArgs.Data);
+        _backend.ErrorDataReceived += (_, eventArgs) => AppendLog(eventArgs.Data);
+        if (!_backend.Start())
+            throw new InvalidOperationException("无法启动本地剪辑后台。");
+        _backend.BeginOutputReadLine();
+        _backend.BeginErrorReadLine();
+    }
+
+    private void AppendLog(string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line) || string.IsNullOrWhiteSpace(_appRoot)) return;
+        try
+        {
+            var folder = Path.Combine(_appRoot, ".data");
+            Directory.CreateDirectory(folder);
+            File.AppendAllText(Path.Combine(folder, "desktop.log"), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {line}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Logging must never interrupt editing.
+        }
+    }
+
+    private async Task WaitForBackendAsync(string url)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(25);
+        Exception? lastError = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_backend is { HasExited: true })
+                throw new InvalidOperationException("本地剪辑后台提前退出。");
+            try
+            {
+                using var response = await _http.GetAsync(url + "/api/config");
+                if (response.IsSuccessStatusCode) return;
+            }
+            catch (Exception exception)
+            {
+                lastError = exception;
+            }
+            await Task.Delay(200);
+        }
+        throw new TimeoutException("本地剪辑后台启动超时。" + (lastError is null ? "" : $" {lastError.Message}"));
+    }
+
+    private async Task InitializeWebViewAsync(string appRoot, string url)
+    {
+        var userData = Path.Combine(appRoot, ".data", "webview2");
+        var environment = await CoreWebView2Environment.CreateAsync(null, userData);
+        await _webView.EnsureCoreWebView2Async(environment);
+        var settings = _webView.CoreWebView2.Settings;
+        settings.AreDefaultContextMenusEnabled = false;
+        settings.AreDevToolsEnabled = false;
+        settings.AreBrowserAcceleratorKeysEnabled = false;
+        settings.IsStatusBarEnabled = false;
+        settings.IsZoomControlEnabled = false;
+        settings.IsGeneralAutofillEnabled = false;
+        settings.IsPasswordAutosaveEnabled = false;
+        _webView.CoreWebView2.NewWindowRequested += (_, eventArgs) => eventArgs.Handled = true;
+        _webView.CoreWebView2.NavigationStarting += (_, eventArgs) =>
+        {
+            if (!eventArgs.Uri.StartsWith(url, StringComparison.OrdinalIgnoreCase))
+                eventArgs.Cancel = true;
+        };
+        _webView.Source = new Uri(url);
+    }
+
+    private async void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
+    {
+        if (_allowClose) return;
+        eventArgs.Cancel = true;
+        if (_closeInProgress) return;
+        _closeInProgress = true;
+        _loadingPanel.Visible = true;
+        _loadingLabel.Text = "正在保存并安全关闭…";
+        _loadingPanel.BringToFront();
+        try
+        {
+            if (_webView.CoreWebView2 is not null)
+            {
+                await _webView.CoreWebView2.ExecuteScriptAsync(
+                    "window.textCutFlushSaves ? window.textCutFlushSaves() : true");
+                // ExecuteScriptAsync starts the promise but does not guarantee
+                // that its fetch requests have settled before returning.
+                await Task.Delay(700);
+            }
+        }
+        catch
+        {
+            // The regular 450 ms autosave remains the fallback.
+        }
+        ShutdownBackend();
+        _allowClose = true;
+        BeginInvoke(Close);
+    }
+
+    private void ShutdownBackend()
+    {
+        if (_backend is null) return;
+        try
+        {
+            if (!_backend.HasExited && _backendUrl is not null && _desktopToken is not null)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, _backendUrl + "/api/desktop/shutdown");
+                request.Headers.Add("X-TextCut-Desktop-Token", _desktopToken);
+                _http.Send(request);
+                if (!_backend.WaitForExit(4000))
+                    _backend.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            try
+            {
+                if (!_backend.HasExited) _backend.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // Windows is already closing the process.
+            }
+        }
+        finally
+        {
+            _backend.Dispose();
+            _http.Dispose();
+        }
+    }
+
+    private static int GetAvailablePort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+}

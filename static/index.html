@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>对白剪辑台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a id="brandHome" class="brand" href="#" aria-label="对白剪辑台首页">
+        <span class="brand-mark"><i></i><i></i><i></i></span>
+        <span><strong>对白剪辑台</strong><small>用文字整理你的镜头</small></span>
+      </a>
+      <div class="top-actions">
+        <span id="engineBadge" class="engine-badge checking"><i></i>正在检查本地引擎</span>
+        <button id="trashButton" class="button ghost small">回收区</button>
+        <button id="newProjectButton" class="button secondary small">新建项目</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="welcomeView" class="view welcome-view">
+        <div class="hero-copy">
+          <span class="eyebrow">LOCAL · PRIVATE · FAST</span>
+          <h1>像整理文章一样<br>剪掉视频里的废话。</h1>
+          <p>视频和文字都留在你的电脑里。识别对白，删掉不需要的句子，自动收紧停顿，再导出干净成片。</p>
+        </div>
+
+        <div class="import-card">
+          <div class="step-label"><span>01</span> 导入一段对话视频</div>
+          <label class="drop-zone" id="dropZone">
+            <input id="fileInput" type="file" accept="video/*,.mkv">
+            <span class="upload-icon">↗</span>
+            <strong>选择视频</strong>
+            <small>也可以把文件拖到这里</small>
+            <em>MP4、MOV、MKV 等视频格式</em>
+          </label>
+          <div class="or"><span>或</span></div>
+          <form id="pathForm" class="path-form">
+            <label for="pathInput">直接使用电脑里的文件路径</label>
+            <div><input id="pathInput" placeholder="例如 D:\视频\访谈.mp4" autocomplete="off"><button class="button dark">打开</button></div>
+            <small>使用路径无需复制大文件，速度更快。</small>
+          </form>
+        </div>
+
+        <section class="recent-section">
+          <div class="section-heading"><div><span class="eyebrow">RECENT WORK</span><h2>最近项目</h2></div></div>
+          <div id="recentProjects" class="project-grid"></div>
+        </section>
+
+        <section id="trashSection" class="trash-section hidden">
+          <div class="section-heading trash-heading"><div><span class="eyebrow">RECYCLE BIN</span><h2>回收区</h2><p id="trashSummary"></p></div><button id="closeTrashButton" class="text-button">关闭</button></div>
+          <div id="trashProjects" class="trash-list"></div>
+        </section>
+      </section>
+
+      <section id="editorView" class="view editor-view hidden">
+        <div class="editor-heading">
+          <div>
+            <button id="backButton" class="text-button">← 返回项目</button>
+            <div class="title-line"><h1 id="projectTitle">未命名项目</h1><span id="saveState">已保存</span></div>
+            <p id="projectMeta">等待视频信息</p>
+          </div>
+          <div class="editor-actions">
+            <button id="deleteProjectButton" class="button danger">删除项目</button>
+            <button id="previewButton" class="button secondary" disabled>生成剪后预览</button>
+            <button id="renderButton" class="button accent" disabled>导出成片</button>
+          </div>
+        </div>
+
+        <div id="taskPanel" class="task-panel hidden">
+          <div class="task-copy"><span id="taskIcon" class="spinner"></span><div><strong id="taskTitle">正在处理</strong><small id="taskDetail">请稍候</small></div></div>
+          <div class="progress-track"><i id="taskProgress"></i></div>
+          <button id="resumeUploadButton" class="button small ghost hidden">继续导入</button>
+          <button id="cancelTaskButton" class="button small task-cancel hidden">取消任务</button>
+          <button id="taskLogToggle" class="text-button">查看记录</button>
+          <pre id="taskLog" class="task-log hidden"></pre>
+        </div>
+
+        <div id="outputCard" class="output-card editor-output-card hidden">
+          <div class="output-copy"><span class="eyebrow">LATEST OUTPUT</span><h3 id="outputTitle">预览已生成</h3><p id="outputMeta"></p></div>
+          <div class="output-actions"><button id="playOutputButton" class="button dark">播放最新结果</button><button id="openOutputFolderButton" class="button secondary">打开文件夹</button></div>
+        </div>
+
+        <div id="emptyTranscript" class="transcribe-stage">
+          <div class="video-card">
+            <video id="sourceVideo" controls preload="metadata"></video>
+            <div class="video-placeholder"><span>▶</span><p>视频准备就绪</p></div>
+          </div>
+          <div class="transcribe-copy">
+            <span class="step-label"><span>02</span> 识别对白</span>
+            <h2>把声音变成可剪辑文字</h2>
+            <p>直接复用 Subtitle Edit 已下载的本地引擎和模型，并保留逐词时间。识别过程不会上传视频。</p>
+            <div class="recognition-settings">
+              <label for="engineSelect"><span>识别引擎</span><select id="engineSelect"></select></label>
+              <label for="modelSelect"><span>本地模型</span><select id="modelSelect"></select></label>
+              <div class="recognition-status"><small id="recognitionCapability">正在检查 Subtitle Edit 的已安装模型…</small><button id="refreshModelsButton" type="button" class="text-button">重新扫描</button></div>
+            </div>
+            <button id="transcribeButton" class="button accent large">开始识别对白</button>
+            <div class="model-note"><i></i><span><strong>本地识别</strong><small id="selectedModelNote">读取 Subtitle Edit 安装目录</small></span></div>
+            <form id="srtForm" class="srt-form">
+              <label for="srtPathInput">已经有 Subtitle Edit 字幕？</label>
+              <div><input id="srtPathInput" placeholder="粘贴 .srt 文件路径"><button class="button secondary small">直接使用</button></div>
+            </form>
+          </div>
+        </div>
+
+        <div id="workspace" class="workspace hidden">
+          <aside class="preview-pane">
+            <div class="sticky-preview">
+              <div class="video-frame">
+                <video id="editVideo" controls preload="metadata"></video>
+                <span id="videoTime" class="timecode">00:00:00</span>
+              </div>
+              <div class="preview-mode-bar"><button id="previewModeToggle" class="preview-mode-toggle on" type="button" aria-pressed="true"><i></i>剪后即时试听</button><span id="previewModeHint">播放时自动跳过已删字词和收紧的停顿</span></div>
+              <div class="cut-summary">
+                <div><span>原片</span><strong id="sourceDuration">—</strong></div>
+                <div><span>预计成片</span><strong id="outputDuration">—</strong></div>
+                <div><span>已删</span><strong id="removedDuration">—</strong></div>
+              </div>
+              <div class="settings-card">
+                <div class="settings-heading"><div><span class="eyebrow">RHYTHM</span><h3>节奏设置</h3></div><button id="resetSettings" class="text-button">恢复默认</button></div>
+                <div class="auto-pause-row"><span><strong>自动收紧长停顿</strong><small>预览和导出时跳过超过阈值的空白</small></span><button id="autoPauseToggle" class="switch on" type="button" aria-pressed="true" aria-label="开关自动收紧长停顿"><i></i></button></div>
+                <label><span>超过多久算长停顿 <output id="thresholdOutput">0.65 秒</output></span><input id="pauseThreshold" type="range" min="300" max="1800" step="50" value="650"></label>
+                <label><span>句子前保留 <output id="leadOutput">0.11 秒</output></span><input id="leadPadding" type="range" min="0" max="400" step="10" value="110"></label>
+                <label><span>句子后保留 <output id="tailOutput">0.15 秒</output></span><input id="tailPadding" type="range" min="0" max="500" step="10" value="150"></label>
+                <label><span>删词切口余量 <output id="wordPaddingOutput">0.05 秒</output></span><input id="wordPadding" type="range" min="20" max="120" step="10" value="50"></label>
+                <p>相邻对白间隔小于阈值时保持连续，较长停顿会被收紧。</p>
+              </div>
+            </div>
+          </aside>
+
+          <section class="transcript-pane">
+            <div class="transcript-toolbar">
+              <div><span class="eyebrow">TRANSCRIPT</span><div class="transcript-title-row"><h2 id="transcriptTitle">剪辑文字</h2><div class="transcript-mode-tabs"><button id="cutModeButton" class="on" type="button" aria-pressed="true">剪视频</button><button id="subtitleModeButton" type="button" aria-pressed="false">改字幕</button></div></div><p id="transcriptHelp">像普通文本一样拖动选择，按 Delete 或 Backspace 删除；选中已删除文字再按一次即可恢复。</p><div class="timing-legend cut-only"><span class="timing-marker breath">气 0.28s</span><span>真实气口</span><span class="timing-marker pause">停 0.82s</span><span>长停顿</span><span class="timing-marker stretch">拖 0.76s</span><span>字音持续</span></div></div>
+              <div class="toolbar-actions"><span id="wordEditStatus" class="word-edit-status cut-only">选择文字后按 Delete</span><span id="subtitleEditStatus" class="word-edit-status subtitle-only">尚未修改字幕</span><button id="scanCleanupButton" class="button ghost small cut-only">检查拖音与重复</button><button id="undoEditButton" class="button ghost small cut-only" disabled>撤销</button><button id="keepAllButton" class="button ghost small cut-only">全部保留</button><button id="removeFillersButton" class="button ghost small cut-only">标记口头禅</button></div>
+            </div>
+            <div id="cleanupPanel" class="cleanup-panel hidden">
+              <div class="cleanup-heading"><div><strong>清理建议</strong><span id="cleanupSummary">正在分析…</span></div><div class="cleanup-batch-actions"><button id="applyAllCleanupButton" class="button dark small">一键应用全部</button><button id="closeCleanupButton" class="text-button">关闭</button></div></div>
+              <p>“应用”会直接执行：重复内容删除第二遍；拖音只收紧估算的尾部，不删除文字。所有操作都可撤销。</p>
+              <div id="cleanupList" class="cleanup-list"></div>
+            </div>
+            <div id="transcriptList" class="transcript-list"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-card">
+      <button class="modal-close" data-close-modal>×</button>
+      <span class="eyebrow">OUTPUT PREVIEW</span>
+      <h2 id="modalTitle">预览</h2>
+      <video id="outputVideo" controls autoplay></video>
+    </div>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
