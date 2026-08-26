@@ -7,6 +7,12 @@ from unittest import mock
 import app
 
 
+class PersistenceTests(unittest.TestCase):
+    def test_missing_transcript_path_uses_default_instead_of_opening_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertEqual(app.read_json(Path(folder), {"segments": []}), {"segments": []})
+
+
 class RecognitionConfigurationTests(unittest.TestCase):
     def make_model(self, root: Path, name: str, size: int = 16) -> Path:
         folder = root / f"faster-whisper-{name}"

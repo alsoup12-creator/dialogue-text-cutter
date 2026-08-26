@@ -60,9 +60,14 @@ def json_bytes(value: Any) -> bytes:
 
 
 def read_json(path: Path, default: Any = None) -> Any:
+    # Path("") becomes ".". New projects do not have a transcript path yet,
+    # so treat directories and other non-files as missing JSON instead of
+    # trying to open the project root and raising PermissionError on Windows.
+    if not path.is_file():
+        return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, IsADirectoryError, json.JSONDecodeError):
         return default
 
 
@@ -445,7 +450,7 @@ def tool_config() -> dict[str, Any]:
     selected_default = default_model_id(models)
     large_v3 = DEFAULT_MODEL_DIR / "faster-whisper-large-v3" / "model.bin"
     return {
-        "appVersion": 11,
+        "appVersion": 12,
         "whisper": str(whisper) if whisper else None,
         "ffmpeg": str(ffmpeg) if ffmpeg else None,
         "ffprobe": str(ffprobe) if ffprobe else None,
@@ -1513,7 +1518,7 @@ class ApiError(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TextCut/0.1"
+    server_version = "TextCut/0.1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -1859,7 +1864,7 @@ def main() -> None:
         with urllib.request.urlopen(f"{url}/api/config", timeout=0.5) as response:
             if response.status == 200:
                 running_config = json.loads(response.read().decode("utf-8"))
-                if int(running_config.get("appVersion", 1)) >= 11:
+                if int(running_config.get("appVersion", 1)) >= 12:
                     print(f"对白文字剪辑器已经在运行：{url}")
                     if args.open and not os.environ.get("TEXTCUT_SKIP_BROWSER"):
                         webbrowser.open(url)

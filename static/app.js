@@ -77,7 +77,7 @@ function formatDate(value) {
 async function loadConfig() {
   state.config = await api("/api/config");
   const badge = $("#engineBadge");
-  state.restartRequired = Number(state.config.appVersion || 1) < 11;
+  state.restartRequired = Number(state.config.appVersion || 1) < 12;
   if (state.restartRequired) {
     badge.className = "engine-badge error";
     badge.innerHTML = "<i></i>请重启以加载今日升级";
