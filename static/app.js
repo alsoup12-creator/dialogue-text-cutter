@@ -8,7 +8,11 @@ const state = {
   deleted: new Set(),
   deletedWords: new Set(),
   deletedTiming: new Set(),
+  timingCleanupInitialized: false,
   subtitleEdits: new Map(),
+  subtitleSearchQuery: "",
+  subtitleSearchIndex: -1,
+  currentSubtitleMatch: null,
   transcriptMode: "cut",
   subtitleSaveTimer: null,
   subtitleSavePromise: Promise.resolve(true),
@@ -77,7 +81,7 @@ function formatDate(value) {
 async function loadConfig() {
   state.config = await api("/api/config");
   const badge = $("#engineBadge");
-  state.restartRequired = Number(state.config.appVersion || 1) < 12;
+  state.restartRequired = Number(state.config.appVersion || 1) < 13;
   if (state.restartRequired) {
     badge.className = "engine-badge error";
     badge.innerHTML = "<i></i>请重启以加载今日升级";
@@ -306,7 +310,11 @@ async function openProject(id) {
     state.deleted = new Set(project.edit?.deletedSegmentIds || []);
     state.deletedWords = new Set(project.edit?.deletedWordIds || []);
     state.deletedTiming = new Set(project.edit?.deletedTimingIds || []);
+    state.timingCleanupInitialized = project.edit?.timingCleanupInitialized === true;
     state.subtitleEdits = new Map(Object.entries(project.subtitleEdits || {}));
+    state.subtitleSearchQuery = "";
+    state.subtitleSearchIndex = -1;
+    state.currentSubtitleMatch = null;
     state.transcriptMode = "cut";
     state.editHistory = [];
     state.editFuture = [];
@@ -321,7 +329,9 @@ async function openProject(id) {
     syncRecognitionOptions();
     if (project.transcript) {
       state.transcript = await api(`/api/projects/${id}/transcript`);
+      const automaticTimingCount = await initializeTimingCleanup();
       showWorkspace();
+      if (automaticTimingCount) showToast(`首次已自动清理 ${automaticTimingCount} 处超过 0.5 秒的拖音、气口或停顿，可撤销`);
     } else {
       state.transcript = null;
       showTranscribeStage();
@@ -385,7 +395,7 @@ function showWorkspace() {
 
 function syncSettings() {
   const edit = state.project?.edit || {};
-  $("#pauseThreshold").value = edit.pauseThresholdMs ?? 650;
+  $("#pauseThreshold").value = edit.pauseThresholdMs ?? 500;
   $("#leadPadding").value = edit.leadPaddingMs ?? 110;
   $("#tailPadding").value = edit.tailPaddingMs ?? 150;
   $("#wordPadding").value = edit.wordPaddingMs ?? 50;
@@ -407,6 +417,7 @@ function editPayload() {
     deletedSegmentIds: [...state.deleted],
     deletedWordIds: [...state.deletedWords],
     deletedTimingIds: [...state.deletedTiming],
+    timingCleanupInitialized: state.timingCleanupInitialized,
     autoRemoveLongPauses: $("#autoPauseToggle").classList.contains("on"),
     pauseThresholdMs: Number($("#pauseThreshold").value),
     leadPaddingMs: Number($("#leadPadding").value),
@@ -521,6 +532,146 @@ function subtitleText(segment) {
   return state.subtitleEdits.has(segment.id) ? state.subtitleEdits.get(segment.id) : cutSubtitleText(segment);
 }
 
+function activeSubtitleSegments() {
+  return state.transcript?.segments.filter((segment) => !state.deleted.has(segment.id)) || [];
+}
+
+function subtitleMatches(query = $("#subtitleFindInput")?.value || "") {
+  if (!query) return [];
+  const needle = query.toLocaleLowerCase();
+  const matches = [];
+  for (const segment of activeSubtitleSegments()) {
+    const text = subtitleText(segment);
+    const searchable = text.toLocaleLowerCase();
+    let start = 0;
+    while (start <= searchable.length - needle.length) {
+      const index = searchable.indexOf(needle, start);
+      if (index < 0) break;
+      matches.push({ segmentId: segment.id, start: index, length: query.length });
+      start = index + Math.max(1, needle.length);
+    }
+  }
+  return matches;
+}
+
+function updateSubtitleFindStatus() {
+  const status = $("#subtitleFindStatus");
+  if (!status) return;
+  const query = $("#subtitleFindInput")?.value || "";
+  if (!query) {
+    status.textContent = "输入文字开始查找；Ctrl+F 可直接定位这里";
+    return;
+  }
+  const matches = subtitleMatches(query);
+  const current = state.currentSubtitleMatch && state.subtitleSearchQuery === query
+    ? Math.max(0, matches.findIndex((match) => match.segmentId === state.currentSubtitleMatch.segmentId && match.start === state.currentSubtitleMatch.start)) + 1
+    : 0;
+  status.textContent = matches.length ? `找到 ${matches.length} 处${current ? ` · 当前第 ${current} 处` : ""}` : "没有找到匹配字幕";
+}
+
+function selectSubtitleMatch(match) {
+  const editor = $(`.segment[data-id="${match.segmentId}"] .subtitle-editor`);
+  if (!editor) return false;
+  const node = editor.firstChild;
+  if (!node || node.nodeType !== Node.TEXT_NODE) return false;
+  editor.focus({ preventScroll: true });
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.setStart(node, Math.min(match.start, node.textContent.length));
+  range.setEnd(node, Math.min(match.start + match.length, node.textContent.length));
+  selection.removeAllRanges();
+  selection.addRange(range);
+  editor.closest(".segment").scrollIntoView({ behavior: "smooth", block: "center" });
+  return true;
+}
+
+function findNextSubtitle() {
+  const query = $("#subtitleFindInput").value;
+  if (!query) {
+    $("#subtitleFindInput").focus();
+    return showToast("请先输入要查找的字幕", true);
+  }
+  const matches = subtitleMatches(query);
+  if (!matches.length) {
+    state.currentSubtitleMatch = null;
+    updateSubtitleFindStatus();
+    return showToast("没有找到匹配字幕", true);
+  }
+  if (state.subtitleSearchQuery !== query) state.subtitleSearchIndex = -1;
+  state.subtitleSearchQuery = query;
+  state.subtitleSearchIndex = (state.subtitleSearchIndex + 1) % matches.length;
+  state.currentSubtitleMatch = matches[state.subtitleSearchIndex];
+  selectSubtitleMatch(state.currentSubtitleMatch);
+  updateSubtitleFindStatus();
+}
+
+function replaceLiteral(text, query, replacement, firstOnly = false) {
+  if (!query) return { text, count: 0 };
+  const searchable = text.toLocaleLowerCase();
+  const needle = query.toLocaleLowerCase();
+  let cursor = 0;
+  let count = 0;
+  let result = "";
+  while (cursor <= text.length - query.length) {
+    const index = searchable.indexOf(needle, cursor);
+    if (index < 0) break;
+    result += text.slice(cursor, index) + replacement;
+    cursor = index + query.length;
+    count += 1;
+    if (firstOnly) break;
+  }
+  if (!count) return { text, count: 0 };
+  return { text: result + text.slice(cursor), count };
+}
+
+function storeSubtitleText(segment, value) {
+  const base = cutSubtitleText(segment);
+  if (value === base) state.subtitleEdits.delete(segment.id); else state.subtitleEdits.set(segment.id, value);
+}
+
+function replaceCurrentSubtitle() {
+  const query = $("#subtitleFindInput").value;
+  const replacement = $("#subtitleReplaceInput").value;
+  if (!query) return showToast("请先输入要查找的字幕", true);
+  let match = state.currentSubtitleMatch;
+  if (!match || state.subtitleSearchQuery !== query) {
+    findNextSubtitle();
+    match = state.currentSubtitleMatch;
+  }
+  if (!match) return;
+  const segment = activeSubtitleSegments().find((item) => item.id === match.segmentId);
+  if (!segment) return findNextSubtitle();
+  const original = subtitleText(segment);
+  const selected = original.slice(match.start, match.start + match.length);
+  if (selected.toLocaleLowerCase() !== query.toLocaleLowerCase()) return findNextSubtitle();
+  const updated = original.slice(0, match.start) + replacement + original.slice(match.start + match.length);
+  storeSubtitleText(segment, updated);
+  state.currentSubtitleMatch = null;
+  renderTranscript();
+  updateSubtitleEditStatus();
+  scheduleSubtitleSave();
+  showToast("已替换当前字幕");
+}
+
+function replaceAllSubtitles() {
+  const query = $("#subtitleFindInput").value;
+  const replacement = $("#subtitleReplaceInput").value;
+  if (!query) return showToast("请先输入要查找的字幕", true);
+  const total = subtitleMatches(query).length;
+  if (!total) return showToast("没有找到匹配字幕", true);
+  if (!window.confirm(`把 ${total} 处“${query}”全部替换为“${replacement}”？\n\n只修改字幕，不改变声音和画面。`)) return;
+  for (const segment of activeSubtitleSegments()) {
+    const replaced = replaceLiteral(subtitleText(segment), query, replacement);
+    if (replaced.count) storeSubtitleText(segment, replaced.text);
+  }
+  state.currentSubtitleMatch = null;
+  state.subtitleSearchIndex = -1;
+  renderTranscript();
+  updateSubtitleEditStatus();
+  scheduleSubtitleSave();
+  showToast(`已替换 ${total} 处字幕`);
+}
+
 function normalizedWordText(text) {
   return String(text || "").toLowerCase().replace(/[\s，。！？、；：,.!?;:…—~～“”‘’（）()《》【】]/g, "");
 }
@@ -528,6 +679,7 @@ function normalizedWordText(text) {
 function createTimingMarker(kind, seconds, extraClass = "", timingId = null) {
   const marker = document.createElement(timingId ? "button" : "span");
   const labels = { breath: "气", pause: "停", stretch: "拖" };
+  const names = { breath: "气口", pause: "停顿", stretch: "拖音尾部" };
   const removed = timingId && state.deletedTiming.has(timingId);
   marker.className = `timing-marker ${kind}${timingId ? " actionable" : ""}${removed ? " removed" : ""}${extraClass ? ` ${extraClass}` : ""}`;
   marker.textContent = `${labels[kind]} ${Number(seconds).toFixed(2)}s`;
@@ -536,7 +688,7 @@ function createTimingMarker(kind, seconds, extraClass = "", timingId = null) {
     marker.dataset.timingId = timingId;
     marker.dataset.timingKind = kind;
     marker.dataset.timingSeconds = String(seconds);
-    marker.setAttribute("aria-label", `${removed ? "恢复" : "清除"}${kind === "stretch" ? "拖音尾部" : "气口"} ${Number(seconds).toFixed(2)} 秒`);
+    marker.setAttribute("aria-label", `${removed ? "恢复" : "清除"}${names[kind]} ${Number(seconds).toFixed(2)} 秒`);
     marker.addEventListener("click", (event) => {
       event.stopPropagation();
       toggleTimingCut(timingId);
@@ -544,7 +696,7 @@ function createTimingMarker(kind, seconds, extraClass = "", timingId = null) {
   } else {
     marker.setAttribute("aria-hidden", "true");
   }
-  marker.title = `${kind === "stretch" ? "字音持续" : "无对白间隔"}约 ${Number(seconds).toFixed(2)} 秒；${timingId ? "点击可直接清除或恢复" : ""}`;
+  marker.title = `${kind === "stretch" ? "字音持续" : names[kind]}约 ${Number(seconds).toFixed(2)} 秒；${timingId ? "点击可直接清除或恢复" : ""}`;
   return marker;
 }
 
@@ -552,13 +704,85 @@ function shouldMarkStretch(word) {
   const clean = normalizedWordText(word.text);
   const duration = Number(word.end) - Number(word.start);
   const expressive = /[啊嗯呃哦喂哎诶呀哈啦嘛吧呢]/.test(clean);
-  return duration >= .6 && (clean.length <= 2 || expressive);
+  return duration > .5 && (clean.length <= 2 || expressive);
 }
 
 function appendGapMarker(container, gap, timingId = null) {
   if (!Number.isFinite(gap) || gap < .18) return;
-  const threshold = Number($("#pauseThreshold")?.value || 650) / 1000;
+  const threshold = Number($("#pauseThreshold")?.value || 500) / 1000;
   container.appendChild(createTimingMarker(gap >= threshold ? "pause" : "breath", gap, "", timingId));
+}
+
+function timingMarkerData() {
+  if (!state.transcript) return [];
+  const threshold = Number($("#pauseThreshold")?.value || 500) / 1000;
+  const markers = [];
+  const segments = state.transcript.segments || [];
+  const addGap = (id, seconds) => {
+    if (!Number.isFinite(seconds) || seconds < .18) return;
+    markers.push({ id, kind: seconds >= threshold ? "pause" : "breath", seconds });
+  };
+  for (const [segmentIndex, segment] of segments.entries()) {
+    const words = segment.words || [];
+    for (const [wordIndex, word] of words.entries()) {
+      const id = wordId(segment, wordIndex);
+      const duration = Number(word.end) - Number(word.start);
+      if (shouldMarkStretch(word)) markers.push({ id: `stretch:${id}`, kind: "stretch", seconds: duration });
+      const nextWord = words[wordIndex + 1];
+      if (nextWord) addGap(`gap:${id}`, Number(nextWord.start) - Number(word.end));
+    }
+    const nextSegment = segments[segmentIndex + 1];
+    if (nextSegment) {
+      const left = Number(words.at(-1)?.end ?? segment.end);
+      const right = Number(nextSegment.words?.[0]?.start ?? nextSegment.start);
+      addGap(`gap:${segment.id}:end`, right - left);
+    }
+  }
+  return markers;
+}
+
+async function initializeTimingCleanup() {
+  if (!state.transcript || state.timingCleanupInitialized) return 0;
+  if (Number($("#pauseThreshold").value) > 500) {
+    $("#pauseThreshold").value = 500;
+    updateSettingLabels();
+  }
+  const ids = timingMarkerData()
+    .filter((marker) => marker.seconds > .5 && !state.deletedTiming.has(marker.id))
+    .map((marker) => marker.id);
+  if (ids.length) {
+    pushEditHistory();
+    ids.forEach((id) => state.deletedTiming.add(id));
+  }
+  state.timingCleanupInitialized = true;
+  state.project = await api(`/api/projects/${state.project.id}/edit`, { method: "POST", body: JSON.stringify(editPayload()) });
+  return ids.length;
+}
+
+function updateTimingBatchStatus() {
+  if (!state.transcript) return;
+  const remaining = timingMarkerData().filter((marker) => !state.deletedTiming.has(marker.id));
+  const counts = Object.fromEntries(["stretch", "breath", "pause"].map((kind) => [kind, remaining.filter((marker) => marker.kind === kind).length]));
+  $("#timingBatchStatus").textContent = `待处理：拖 ${counts.stretch} · 气 ${counts.breath} · 停 ${counts.pause}`;
+  $("#removeAllTimingButton").disabled = !remaining.length;
+  $("#removeAllStretchButton").disabled = !counts.stretch;
+  $("#removeAllBreathButton").disabled = !counts.breath;
+  $("#removeAllPauseButton").disabled = !counts.pause;
+}
+
+function removeAllTiming(kind = "all") {
+  const labels = { all: "拖音、气口和停顿", stretch: "拖音", breath: "气口", pause: "停顿" };
+  const ids = timingMarkerData()
+    .filter((marker) => (kind === "all" || marker.kind === kind) && !state.deletedTiming.has(marker.id))
+    .map((marker) => marker.id);
+  if (!ids.length) return showToast(`当前没有待清理的${labels[kind]}`);
+  pushEditHistory();
+  ids.forEach((id) => state.deletedTiming.add(id));
+  renderTranscript();
+  updateSummary();
+  scheduleSave();
+  refreshCleanupSuggestions();
+  showToast(`已一键清理 ${ids.length} 处${labels[kind]}，可撤销`);
 }
 
 function cleanupSuggestion(type, segment, wordIds, text, reason, start, timingIds = []) {
@@ -865,9 +1089,10 @@ function toggleTimingCut(timingId) {
   const removed = state.deletedTiming.has(timingId);
   $$(`[data-timing-id="${CSS.escape(timingId)}"]`).forEach((marker) => {
     const kind = marker.dataset.timingKind;
+    const name = { breath: "气口", pause: "停顿", stretch: "拖音尾部" }[kind];
     const seconds = Number(marker.dataset.timingSeconds || 0);
     marker.classList.toggle("removed", removed);
-    marker.setAttribute("aria-label", `${removed ? "恢复" : "清除"}${kind === "stretch" ? "拖音尾部" : "气口"} ${seconds.toFixed(2)} 秒`);
+    marker.setAttribute("aria-label", `${removed ? "恢复" : "清除"}${name} ${seconds.toFixed(2)} 秒`);
   });
   updateSummary();
   scheduleSave();
@@ -921,6 +1146,8 @@ function renderTranscript(preserveScroll = true) {
         item.classList.toggle("subtitle-custom", custom);
         item.querySelector(".subtitle-reset").disabled = !custom;
         updateSubtitleEditStatus();
+        state.currentSubtitleMatch = null;
+        updateSubtitleFindStatus();
         scheduleSubtitleSave();
       });
       paragraph.addEventListener("blur", () => {
@@ -977,6 +1204,8 @@ function renderTranscript(preserveScroll = true) {
   }
   updateWordEditStatus();
   updateSubtitleEditStatus();
+  updateTimingBatchStatus();
+  updateSubtitleFindStatus();
   restoreTranscriptAnchor(anchor);
 }
 
@@ -994,6 +1223,8 @@ function setTranscriptMode(mode) {
     ? "直接修改错字、标点和表达；这里只改变字幕，不会删除声音或画面。"
     : "像普通文本一样拖动选择，按 Delete 或 Backspace 删除；选中已删除文字再按一次即可恢复。";
   if (subtitleMode) $("#cleanupPanel").classList.add("hidden");
+  state.currentSubtitleMatch = null;
+  state.subtitleSearchIndex = -1;
   window.getSelection()?.removeAllRanges();
   renderTranscript(true);
 }
@@ -1027,7 +1258,7 @@ function clientTimingCutRanges() {
     if (kind === "stretch" && words.has(reference)) {
       const { word } = words.get(reference);
       const start = Number(word.start), end = Number(word.end), duration = end - start;
-      if (duration >= .6) ranges.push([start + Math.min(.48, Math.max(.24, duration * .45)), end]);
+      if (duration > .5) ranges.push([start + Math.min(.48, Math.max(.24, duration * .45)), end]);
     } else if (kind === "gap" && reference.endsWith(":end")) {
       const entry = segmentMap.get(reference.slice(0, -4));
       if (!entry || entry.index + 1 >= segments.length) continue;
@@ -1462,6 +1693,22 @@ function bindEvents() {
   $("#openOutputFolderButton").addEventListener("click", openOutputFolder);
   $("#scanCleanupButton").addEventListener("click", scanCleanupSuggestions);
   $("#applyAllCleanupButton").addEventListener("click", applyAllCleanupSuggestions);
+  $("#removeAllTimingButton").addEventListener("click", () => removeAllTiming("all"));
+  $("#removeAllStretchButton").addEventListener("click", () => removeAllTiming("stretch"));
+  $("#removeAllBreathButton").addEventListener("click", () => removeAllTiming("breath"));
+  $("#removeAllPauseButton").addEventListener("click", () => removeAllTiming("pause"));
+  $("#findNextSubtitleButton").addEventListener("click", findNextSubtitle);
+  $("#replaceCurrentSubtitleButton").addEventListener("click", replaceCurrentSubtitle);
+  $("#replaceAllSubtitlesButton").addEventListener("click", replaceAllSubtitles);
+  $("#subtitleFindInput").addEventListener("input", () => {
+    state.subtitleSearchQuery = $("#subtitleFindInput").value;
+    state.subtitleSearchIndex = -1;
+    state.currentSubtitleMatch = null;
+    updateSubtitleFindStatus();
+  });
+  $("#subtitleFindInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); findNextSubtitle(); }
+  });
   $("#closeCleanupButton").addEventListener("click", () => $("#cleanupPanel").classList.add("hidden"));
   $("#undoEditButton").addEventListener("click", undoEdit);
   $$('[data-close-modal]').forEach((node) => node.addEventListener("click", closeModal));
@@ -1471,7 +1718,7 @@ function bindEvents() {
   $("#pauseThreshold").addEventListener("change", renderTranscript);
   $("#autoPauseToggle").addEventListener("click", toggleAutoPauses);
   $("#resetSettings").addEventListener("click", () => {
-    $("#pauseThreshold").value = 650; $("#leadPadding").value = 110; $("#tailPadding").value = 150; $("#wordPadding").value = 50;
+    $("#pauseThreshold").value = 500; $("#leadPadding").value = 110; $("#tailPadding").value = 150; $("#wordPadding").value = 50;
     $("#autoPauseToggle").classList.add("on"); $("#autoPauseToggle").setAttribute("aria-pressed", "true");
     updateSettingLabels(); updateSummary(); renderTranscript(); scheduleSave();
   });
@@ -1516,6 +1763,20 @@ function bindEvents() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") return closeModal();
+    if ((event.ctrlKey || event.metaKey) && $("#workspace").classList.contains("subtitle-mode")) {
+      if (event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        $("#subtitleFindInput").focus();
+        $("#subtitleFindInput").select();
+        return;
+      }
+      if (event.key.toLowerCase() === "h") {
+        event.preventDefault();
+        $("#subtitleReplaceInput").focus();
+        $("#subtitleReplaceInput").select();
+        return;
+      }
+    }
     const editingControl = event.target.closest?.("input, textarea, select, [contenteditable]");
     if (editingControl) return;
     if ((event.code === "Space" || event.key === " ") && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !event.repeat) {

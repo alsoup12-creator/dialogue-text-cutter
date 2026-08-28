@@ -142,8 +142,9 @@ def create_project(name: str = "新剪辑") -> dict[str, Any]:
             "deletedSegmentIds": [],
             "deletedWordIds": [],
             "deletedTimingIds": [],
+            "timingCleanupInitialized": False,
             "autoRemoveLongPauses": True,
-            "pauseThresholdMs": 650,
+            "pauseThresholdMs": 500,
             "leadPaddingMs": 110,
             "tailPaddingMs": 150,
             "wordPaddingMs": 50,
@@ -450,7 +451,7 @@ def tool_config() -> dict[str, Any]:
     selected_default = default_model_id(models)
     large_v3 = DEFAULT_MODEL_DIR / "faster-whisper-large-v3" / "model.bin"
     return {
-        "appVersion": 12,
+        "appVersion": 13,
         "whisper": str(whisper) if whisper else None,
         "ffmpeg": str(ffmpeg) if ffmpeg else None,
         "ffprobe": str(ffprobe) if ffprobe else None,
@@ -1032,6 +1033,7 @@ def transcribe_worker(project_id: str, job_id: str) -> None:
         project["edit"]["deletedSegmentIds"] = []
         project["edit"]["deletedWordIds"] = []
         project["edit"]["deletedTimingIds"] = []
+        project["edit"]["timingCleanupInitialized"] = False
         project["subtitleEdits"] = {}
         project["editRevision"] = int(project.get("editRevision", 0)) + 1
         project["status"] = "识别完成，可以开始文字剪辑" + ("（已自动恢复有效结果）" if tool_error else "")
@@ -1056,7 +1058,7 @@ def compute_clips(segments: list[dict[str, Any]], edit: dict[str, Any], media_du
     kept = [segment for segment in segments if segment.get("id") not in deleted]
     if not kept:
         return []
-    threshold = max(0, float(edit.get("pauseThresholdMs", 650)) / 1000) if edit.get("autoRemoveLongPauses", True) else float("inf")
+    threshold = max(0, float(edit.get("pauseThresholdMs", 500)) / 1000) if edit.get("autoRemoveLongPauses", True) else float("inf")
     lead = max(0, float(edit.get("leadPaddingMs", 110)) / 1000)
     tail = max(0, float(edit.get("tailPaddingMs", 150)) / 1000)
     limit = float(media_duration) if media_duration else float("inf")
@@ -1194,7 +1196,7 @@ def timing_cut_ranges(segments: list[dict[str, Any]], edit: dict[str, Any]) -> l
             word, _ = words[reference]
             start, end = float(word["start"]), float(word["end"])
             duration = end - start
-            if duration >= 0.6:
+            if duration > 0.5:
                 keep = min(0.48, max(0.24, duration * 0.45))
                 ranges.append((start + keep, end))
         elif kind == "gap":
@@ -1297,6 +1299,11 @@ def normalize_edit_update(current: Any, value: Any, segments: list[dict[str, Any
         if not isinstance(value["autoRemoveLongPauses"], bool):
             raise ValueError("自动清理停顿设置无效")
         result["autoRemoveLongPauses"] = value["autoRemoveLongPauses"]
+
+    if "timingCleanupInitialized" in value:
+        if not isinstance(value["timingCleanupInitialized"], bool):
+            raise ValueError("首次节奏清理状态无效")
+        result["timingCleanupInitialized"] = value["timingCleanupInitialized"]
 
     numeric_fields = {
         "pauseThresholdMs": (300.0, 1800.0, "长停顿阈值"),
@@ -1518,7 +1525,7 @@ class ApiError(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TextCut/0.1.1"
+    server_version = "TextCut/0.2.0"
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")
@@ -1772,6 +1779,7 @@ class Handler(BaseHTTPRequestHandler):
                 project["edit"]["deletedSegmentIds"] = []
                 project["edit"]["deletedWordIds"] = []
                 project["edit"]["deletedTimingIds"] = []
+                project["edit"]["timingCleanupInitialized"] = False
                 project["subtitleEdits"] = {}
                 project["editRevision"] = int(project.get("editRevision", 0)) + 1
                 project["status"] = "字幕已导入，可以开始文字剪辑"
@@ -1864,7 +1872,7 @@ def main() -> None:
         with urllib.request.urlopen(f"{url}/api/config", timeout=0.5) as response:
             if response.status == 200:
                 running_config = json.loads(response.read().decode("utf-8"))
-                if int(running_config.get("appVersion", 1)) >= 12:
+                if int(running_config.get("appVersion", 1)) >= 13:
                     print(f"对白文字剪辑器已经在运行：{url}")
                     if args.open and not os.environ.get("TEXTCUT_SKIP_BROWSER"):
                         webbrowser.open(url)

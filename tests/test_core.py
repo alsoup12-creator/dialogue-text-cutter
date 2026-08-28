@@ -284,14 +284,27 @@ class TranscriptTests(unittest.TestCase):
         normalized = app.normalize_edit_update(current, {
             "deletedWordIds": ["s00001:w0000", "s00001:w0000"],
             "deletedTimingIds": ["gap:s00001:w0000"],
+            "timingCleanupInitialized": True,
             "pauseThresholdMs": 700,
         }, segments)
         self.assertEqual(normalized["deletedWordIds"], ["s00001:w0000"])
         self.assertEqual(normalized["deletedTimingIds"], ["gap:s00001:w0000"])
+        self.assertTrue(normalized["timingCleanupInitialized"])
         with self.assertRaisesRegex(ValueError, "不存在"):
             app.normalize_edit_update(current, {"deletedWordIds": ["s00001:w9999"]}, segments)
         with self.assertRaisesRegex(ValueError, "超出"):
             app.normalize_edit_update(current, {"wordPaddingMs": 999}, segments)
+        with self.assertRaisesRegex(ValueError, "首次节奏清理"):
+            app.normalize_edit_update(current, {"timingCleanupInitialized": "yes"}, segments)
+
+    def test_stretch_just_over_half_second_can_be_trimmed(self):
+        segments = [{
+            "id": "s00001", "start": 0.0, "end": 0.55, "text": "啊",
+            "words": [{"text": "啊", "start": 0.0, "end": 0.55}],
+        }]
+        ranges = app.timing_cut_ranges(segments, {"deletedTimingIds": ["stretch:s00001:w0000"]})
+        self.assertEqual(len(ranges), 1)
+        self.assertAlmostEqual(ranges[0][1], 0.55)
 
 
 class ProjectDeletionTests(unittest.TestCase):

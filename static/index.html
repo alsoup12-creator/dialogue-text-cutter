@@ -124,7 +124,7 @@
               <div class="settings-card">
                 <div class="settings-heading"><div><span class="eyebrow">RHYTHM</span><h3>节奏设置</h3></div><button id="resetSettings" class="text-button">恢复默认</button></div>
                 <div class="auto-pause-row"><span><strong>自动收紧长停顿</strong><small>预览和导出时跳过超过阈值的空白</small></span><button id="autoPauseToggle" class="switch on" type="button" aria-pressed="true" aria-label="开关自动收紧长停顿"><i></i></button></div>
-                <label><span>超过多久算长停顿 <output id="thresholdOutput">0.65 秒</output></span><input id="pauseThreshold" type="range" min="300" max="1800" step="50" value="650"></label>
+                <label><span>超过多久算长停顿 <output id="thresholdOutput">0.50 秒</output></span><input id="pauseThreshold" type="range" min="300" max="1800" step="50" value="500"></label>
                 <label><span>句子前保留 <output id="leadOutput">0.11 秒</output></span><input id="leadPadding" type="range" min="0" max="400" step="10" value="110"></label>
                 <label><span>句子后保留 <output id="tailOutput">0.15 秒</output></span><input id="tailPadding" type="range" min="0" max="500" step="10" value="150"></label>
                 <label><span>删词切口余量 <output id="wordPaddingOutput">0.05 秒</output></span><input id="wordPadding" type="range" min="20" max="120" step="10" value="50"></label>
@@ -137,6 +137,16 @@
             <div class="transcript-toolbar">
               <div><span class="eyebrow">TRANSCRIPT</span><div class="transcript-title-row"><h2 id="transcriptTitle">剪辑文字</h2><div class="transcript-mode-tabs"><button id="cutModeButton" class="on" type="button" aria-pressed="true">剪视频</button><button id="subtitleModeButton" type="button" aria-pressed="false">改字幕</button></div></div><p id="transcriptHelp">像普通文本一样拖动选择，按 Delete 或 Backspace 删除；选中已删除文字再按一次即可恢复。</p><div class="timing-legend cut-only"><span class="timing-marker breath">气 0.28s</span><span>真实气口</span><span class="timing-marker pause">停 0.82s</span><span>长停顿</span><span class="timing-marker stretch">拖 0.76s</span><span>字音持续</span></div></div>
               <div class="toolbar-actions"><span id="wordEditStatus" class="word-edit-status cut-only">选择文字后按 Delete</span><span id="subtitleEditStatus" class="word-edit-status subtitle-only">尚未修改字幕</span><button id="scanCleanupButton" class="button ghost small cut-only">检查拖音与重复</button><button id="undoEditButton" class="button ghost small cut-only" disabled>撤销</button><button id="keepAllButton" class="button ghost small cut-only">全部保留</button><button id="removeFillersButton" class="button ghost small cut-only">标记口头禅</button></div>
+            </div>
+            <div class="timing-batch-bar cut-only">
+              <div><strong>节奏批量清理</strong><span id="timingBatchStatus">正在统计…</span></div>
+              <div><button id="removeAllTimingButton" class="button dark small" type="button">一键清理全部</button><button id="removeAllStretchButton" class="button ghost small" type="button">全部拖音</button><button id="removeAllBreathButton" class="button ghost small" type="button">全部气口</button><button id="removeAllPauseButton" class="button ghost small" type="button">全部停顿</button></div>
+            </div>
+            <div class="subtitle-replace-bar subtitle-only">
+              <label><span>查找</span><input id="subtitleFindInput" type="text" autocomplete="off" placeholder="输入要查找的字幕"></label>
+              <label><span>替换为</span><input id="subtitleReplaceInput" type="text" autocomplete="off" placeholder="输入替换后的文字"></label>
+              <div class="subtitle-replace-actions"><button id="findNextSubtitleButton" class="button ghost small" type="button">查找下一个</button><button id="replaceCurrentSubtitleButton" class="button ghost small" type="button">替换当前</button><button id="replaceAllSubtitlesButton" class="button dark small" type="button">全部替换</button></div>
+              <span id="subtitleFindStatus">输入文字开始查找</span>
             </div>
             <div id="cleanupPanel" class="cleanup-panel hidden">
               <div class="cleanup-heading"><div><strong>清理建议</strong><span id="cleanupSummary">正在分析…</span></div><div class="cleanup-batch-actions"><button id="applyAllCleanupButton" class="button dark small">一键应用全部</button><button id="closeCleanupButton" class="text-button">关闭</button></div></div>
