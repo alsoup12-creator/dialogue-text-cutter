@@ -1456,7 +1456,7 @@ function nativeDesktopBridge() {
 function setNativeImportEnabled(enabled) {
   const bridge = nativeDesktopBridge();
   if (bridge && state.nativeFileBridgeReady) bridge.postMessage({ type: "set-native-import-enabled", enabled });
-  reportNativeDropTargetBounds();
+  scheduleNativeDropTargetBounds();
 }
 
 function reportNativeDropTargetBounds() {
@@ -1473,6 +1473,14 @@ function reportNativeDropTargetBounds() {
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
   });
+}
+
+let nativeDropTargetBoundsTimer = null;
+function scheduleNativeDropTargetBounds() {
+  clearTimeout(nativeDropTargetBoundsTimer);
+  // The local page applies fonts and responsive styles just after startup.
+  // Wait for that layout to settle before placing the native drop target.
+  nativeDropTargetBoundsTimer = setTimeout(reportNativeDropTargetBounds, 260);
 }
 
 function requestNativeSourcePicker() {
@@ -1492,7 +1500,7 @@ function bindNativeDesktopBridge() {
     if (message.type === "native-bridge-ready") {
       state.nativeFileBridgeReady = true;
       setNativeImportEnabled(!$("#welcomeView").classList.contains("hidden"));
-      reportNativeDropTargetBounds();
+      scheduleNativeDropTargetBounds();
     } else if (message.type === "native-drag-state") {
       $("#dropZone").classList.toggle("dragging", Boolean(message.active));
     } else if (message.type === "native-source-importing") {
@@ -1721,8 +1729,11 @@ function bindEvents() {
     if (file) uploadFile(file).catch((error) => showToast(error.message, true));
   });
   const dropZone = $("#dropZone");
-  window.addEventListener("resize", reportNativeDropTargetBounds);
-  new ResizeObserver(reportNativeDropTargetBounds).observe(dropZone);
+  window.addEventListener("resize", scheduleNativeDropTargetBounds);
+  window.addEventListener("scroll", scheduleNativeDropTargetBounds, true);
+  window.addEventListener("load", scheduleNativeDropTargetBounds, { once: true });
+  new ResizeObserver(scheduleNativeDropTargetBounds).observe(dropZone);
+  if (document.fonts?.ready) document.fonts.ready.then(scheduleNativeDropTargetBounds);
   dropZone.addEventListener("click", requestNativeSourcePicker);
   dropZone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
