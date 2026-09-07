@@ -1456,6 +1456,23 @@ function nativeDesktopBridge() {
 function setNativeImportEnabled(enabled) {
   const bridge = nativeDesktopBridge();
   if (bridge && state.nativeFileBridgeReady) bridge.postMessage({ type: "set-native-import-enabled", enabled });
+  reportNativeDropTargetBounds();
+}
+
+function reportNativeDropTargetBounds() {
+  const bridge = nativeDesktopBridge();
+  const dropZone = $("#dropZone");
+  if (!bridge || !state.nativeFileBridgeReady || !dropZone) return;
+  const rect = dropZone.getBoundingClientRect();
+  bridge.postMessage({
+    type: "native-drop-target-bounds",
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  });
 }
 
 function requestNativeSourcePicker() {
@@ -1475,6 +1492,7 @@ function bindNativeDesktopBridge() {
     if (message.type === "native-bridge-ready") {
       state.nativeFileBridgeReady = true;
       setNativeImportEnabled(!$("#welcomeView").classList.contains("hidden"));
+      reportNativeDropTargetBounds();
     } else if (message.type === "native-drag-state") {
       $("#dropZone").classList.toggle("dragging", Boolean(message.active));
     } else if (message.type === "native-source-importing") {
@@ -1703,6 +1721,8 @@ function bindEvents() {
     if (file) uploadFile(file).catch((error) => showToast(error.message, true));
   });
   const dropZone = $("#dropZone");
+  window.addEventListener("resize", reportNativeDropTargetBounds);
+  new ResizeObserver(reportNativeDropTargetBounds).observe(dropZone);
   dropZone.addEventListener("click", requestNativeSourcePicker);
   dropZone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
