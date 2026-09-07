@@ -29,7 +29,6 @@ internal static class Program
 internal sealed class MainForm : Form
 {
     private readonly WebView2 _webView = new() { Dock = DockStyle.Fill };
-    private readonly NativeVideoDropTarget _nativeDropTarget = new() { Visible = false };
     private readonly Panel _loadingPanel = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(245, 242, 234) };
     private readonly Label _loadingLabel = new()
     {
@@ -65,18 +64,9 @@ internal sealed class MainForm : Form
         Controls.Add(_webView);
         Controls.Add(_loadingPanel);
         _loadingPanel.BringToFront();
-        // WebView2 only exposes browser File objects to the page, not the real
-        // Windows path. A native control is placed precisely over the page's
-        // import box and receives DataFormats.FileDrop directly.
+        // Desktop import uses the native file picker so the backend receives
+        // the original Windows path without copying the source video.
         _webView.AllowExternalDrop = false;
-        DragEnter += OnNativeDragEnter;
-        DragLeave += OnNativeDragLeave;
-        DragDrop += OnNativeDragDrop;
-        _nativeDropTarget.DragEnter += OnNativeDragEnter;
-        _nativeDropTarget.DragLeave += OnNativeDragLeave;
-        _nativeDropTarget.DragDrop += OnNativeDragDrop;
-        _nativeDropTarget.Click += (_, _) => PickNativeSourceFile();
-        Controls.Add(_nativeDropTarget);
         Shown += async (_, _) => await StartAsync();
         FormClosing += OnFormClosing;
     }
@@ -93,7 +83,6 @@ internal sealed class MainForm : Form
             await WaitForBackendAsync(_backendUrl);
             await InitializeWebViewAsync(_appRoot, _backendUrl);
             _loadingPanel.Visible = false;
-            _nativeDropTarget.BringToFront();
             _webView.Focus();
         }
         catch (Exception exception)
@@ -218,12 +207,6 @@ internal sealed class MainForm : Form
             if (type == "set-native-import-enabled" && document.RootElement.TryGetProperty("enabled", out var enabled))
             {
                 _nativeImportEnabled = enabled.GetBoolean();
-                UpdateNativeDropTargetVisibility();
-                return;
-            }
-            if (type == "native-drop-target-bounds")
-            {
-                UpdateNativeDropTargetBounds(document.RootElement);
                 return;
             }
             if (type == "pick-native-source-file" && _nativeImportEnabled)
@@ -251,44 +234,10 @@ internal sealed class MainForm : Form
             _ = ImportNativeSourceAsync(picker.FileName);
     }
 
-    private void OnNativeDragEnter(object? sender, DragEventArgs eventArgs)
-    {
-        if (!_nativeImportEnabled || _sourceImportInProgress || !TryGetDroppedVideo(eventArgs.Data, out _))
-        {
-            eventArgs.Effect = DragDropEffects.None;
-            return;
-        }
-        eventArgs.Effect = DragDropEffects.Copy;
-        PostNativeMessage(new { type = "native-drag-state", active = true });
-    }
-
-    private void OnNativeDragLeave(object? sender, EventArgs eventArgs)
-    {
-        PostNativeMessage(new { type = "native-drag-state", active = false });
-    }
-
-    private void OnNativeDragDrop(object? sender, DragEventArgs eventArgs)
-    {
-        PostNativeMessage(new { type = "native-drag-state", active = false });
-        if (_nativeImportEnabled && !_sourceImportInProgress && TryGetDroppedVideo(eventArgs.Data, out var sourcePath))
-            _ = ImportNativeSourceAsync(sourcePath);
-    }
-
-    private static bool TryGetDroppedVideo(IDataObject? data, out string sourcePath)
-    {
-        sourcePath = "";
-        if (data?.GetDataPresent(DataFormats.FileDrop) != true) return false;
-        if (data.GetData(DataFormats.FileDrop) is not string[] files || files.Length != 1) return false;
-        if (!File.Exists(files[0])) return false;
-        sourcePath = files[0];
-        return true;
-    }
-
     private async Task ImportNativeSourceAsync(string sourcePath)
     {
         if (_sourceImportInProgress || _backendUrl is null) return;
         _sourceImportInProgress = true;
-        UpdateNativeDropTargetVisibility();
         PostNativeMessage(new { type = "native-source-importing" });
         try
         {
@@ -315,38 +264,7 @@ internal sealed class MainForm : Form
         finally
         {
             _sourceImportInProgress = false;
-            UpdateNativeDropTargetVisibility();
         }
-    }
-
-    private void UpdateNativeDropTargetBounds(JsonElement message)
-    {
-        if (!TryReadNumber(message, "left", out var left) || !TryReadNumber(message, "top", out var top) ||
-            !TryReadNumber(message, "width", out var width) || !TryReadNumber(message, "height", out var height) ||
-            !TryReadNumber(message, "viewportWidth", out var viewportWidth) || !TryReadNumber(message, "viewportHeight", out var viewportHeight) ||
-            viewportWidth <= 0 || viewportHeight <= 0 || width <= 0 || height <= 0)
-            return;
-
-        var scaleX = _webView.ClientSize.Width / viewportWidth;
-        var scaleY = _webView.ClientSize.Height / viewportHeight;
-        _nativeDropTarget.Bounds = Rectangle.FromLTRB(
-            _webView.Left + (int)Math.Round(left * scaleX),
-            _webView.Top + (int)Math.Round(top * scaleY),
-            _webView.Left + (int)Math.Round((left + width) * scaleX),
-            _webView.Top + (int)Math.Round((top + height) * scaleY));
-        UpdateNativeDropTargetVisibility();
-    }
-
-    private void UpdateNativeDropTargetVisibility()
-    {
-        _nativeDropTarget.Visible = _nativeImportEnabled && !_sourceImportInProgress && _nativeDropTarget.Width > 0 && _nativeDropTarget.Height > 0;
-        if (_nativeDropTarget.Visible) _nativeDropTarget.BringToFront();
-    }
-
-    private static bool TryReadNumber(JsonElement message, string name, out double value)
-    {
-        value = 0;
-        return message.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.Number && property.TryGetDouble(out value);
     }
 
     private static string ReadApiError(string body, string fallback)
@@ -445,66 +363,5 @@ internal sealed class MainForm : Form
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
-    }
-}
-
-internal sealed class NativeVideoDropTarget : Control
-{
-    private bool _dragging;
-
-    public NativeVideoDropTarget()
-    {
-        AllowDrop = true;
-        Cursor = Cursors.Hand;
-        TabStop = false;
-        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
-    }
-
-    protected override void OnDragEnter(DragEventArgs eventArgs)
-    {
-        _dragging = true;
-        Invalidate();
-        base.OnDragEnter(eventArgs);
-    }
-
-    protected override void OnDragLeave(EventArgs eventArgs)
-    {
-        _dragging = false;
-        Invalidate();
-        base.OnDragLeave(eventArgs);
-    }
-
-    protected override void OnDragDrop(DragEventArgs eventArgs)
-    {
-        _dragging = false;
-        Invalidate();
-        base.OnDragDrop(eventArgs);
-    }
-
-    protected override void OnPaint(PaintEventArgs eventArgs)
-    {
-        var graphics = eventArgs.Graphics;
-        graphics.Clear(_dragging ? Color.FromArgb(240, 247, 239) : Color.FromArgb(251, 250, 246));
-        using var border = new Pen(_dragging ? Color.FromArgb(31, 83, 68) : Color.FromArgb(162, 170, 157), _dragging ? 2F : 1F)
-        {
-            DashStyle = System.Drawing.Drawing2D.DashStyle.Dash,
-        };
-        graphics.DrawRectangle(border, 1, 1, Math.Max(0, Width - 3), Math.Max(0, Height - 3));
-        using var iconFont = new Font("Segoe UI Symbol", 28F);
-        using var titleFont = new Font("微软雅黑", 15F, FontStyle.Bold);
-        using var bodyFont = new Font("微软雅黑", 11F);
-        using var smallFont = new Font("微软雅黑", 9F);
-        var center = Width / 2F;
-        DrawCentered(graphics, "→", iconFont, Color.FromArgb(31, 83, 68), center, Height * 0.22F);
-        DrawCentered(graphics, "选择本地视频", titleFont, Color.FromArgb(25, 28, 25), center, Height * 0.42F);
-        DrawCentered(graphics, "也可以把文件拖到这里，不复制原视频", bodyFont, Color.FromArgb(104, 112, 105), center, Height * 0.59F);
-        DrawCentered(graphics, "MP4、MOV、MKV 等视频格式", smallFont, Color.FromArgb(145, 153, 146), center, Height * 0.77F);
-    }
-
-    private static void DrawCentered(Graphics graphics, string text, Font font, Color color, float centerX, float top)
-    {
-        var size = graphics.MeasureString(text, font);
-        using var brush = new SolidBrush(color);
-        graphics.DrawString(text, font, brush, centerX - size.Width / 2F, top);
     }
 }

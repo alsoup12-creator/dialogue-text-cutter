@@ -1456,31 +1456,6 @@ function nativeDesktopBridge() {
 function setNativeImportEnabled(enabled) {
   const bridge = nativeDesktopBridge();
   if (bridge && state.nativeFileBridgeReady) bridge.postMessage({ type: "set-native-import-enabled", enabled });
-  scheduleNativeDropTargetBounds();
-}
-
-function reportNativeDropTargetBounds() {
-  const bridge = nativeDesktopBridge();
-  const dropZone = $("#dropZone");
-  if (!bridge || !state.nativeFileBridgeReady || !dropZone) return;
-  const rect = dropZone.getBoundingClientRect();
-  bridge.postMessage({
-    type: "native-drop-target-bounds",
-    left: rect.left,
-    top: rect.top,
-    width: rect.width,
-    height: rect.height,
-    viewportWidth: window.innerWidth,
-    viewportHeight: window.innerHeight,
-  });
-}
-
-let nativeDropTargetBoundsTimer = null;
-function scheduleNativeDropTargetBounds() {
-  clearTimeout(nativeDropTargetBoundsTimer);
-  // The local page applies fonts and responsive styles just after startup.
-  // Wait for that layout to settle before placing the native drop target.
-  nativeDropTargetBoundsTimer = setTimeout(reportNativeDropTargetBounds, 260);
 }
 
 function requestNativeSourcePicker() {
@@ -1500,7 +1475,6 @@ function bindNativeDesktopBridge() {
     if (message.type === "native-bridge-ready") {
       state.nativeFileBridgeReady = true;
       setNativeImportEnabled(!$("#welcomeView").classList.contains("hidden"));
-      scheduleNativeDropTargetBounds();
     } else if (message.type === "native-drag-state") {
       $("#dropZone").classList.toggle("dragging", Boolean(message.active));
     } else if (message.type === "native-source-importing") {
@@ -1729,11 +1703,6 @@ function bindEvents() {
     if (file) uploadFile(file).catch((error) => showToast(error.message, true));
   });
   const dropZone = $("#dropZone");
-  window.addEventListener("resize", scheduleNativeDropTargetBounds);
-  window.addEventListener("scroll", scheduleNativeDropTargetBounds, true);
-  window.addEventListener("load", scheduleNativeDropTargetBounds, { once: true });
-  new ResizeObserver(scheduleNativeDropTargetBounds).observe(dropZone);
-  if (document.fonts?.ready) document.fonts.ready.then(scheduleNativeDropTargetBounds);
   dropZone.addEventListener("click", requestNativeSourcePicker);
   dropZone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -1745,9 +1714,8 @@ function bindEvents() {
   for (const name of ["dragleave", "drop"]) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove("dragging"); });
   dropZone.addEventListener("drop", (event) => {
     const file = event.dataTransfer.files[0];
-    // In the desktop host, the native DragDrop event receives the actual
-    // Windows path and imports it without copying. Browser mode keeps the
-    // existing upload fallback because browser File objects do not expose it.
+    // Desktop mode deliberately uses the native file picker for a clean,
+    // path-based import. Browser mode keeps the existing upload fallback.
     if (nativeDesktopBridge() && state.nativeFileBridgeReady) return;
     if (file) uploadFile(file).catch((error) => showToast(error.message, true));
   });
