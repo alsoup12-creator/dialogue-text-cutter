@@ -1712,7 +1712,14 @@ function bindEvents() {
   });
   for (const name of ["dragenter", "dragover"]) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.add("dragging"); });
   for (const name of ["dragleave", "drop"]) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove("dragging"); });
-  dropZone.addEventListener("drop", (event) => { const file = event.dataTransfer.files[0]; if (file) uploadFile(file).catch((error) => showToast(error.message, true)); });
+  dropZone.addEventListener("drop", (event) => {
+    const file = event.dataTransfer.files[0];
+    // In the desktop host, the native DragDrop event receives the actual
+    // Windows path and imports it without copying. Browser mode keeps the
+    // existing upload fallback because browser File objects do not expose it.
+    if (nativeDesktopBridge() && state.nativeFileBridgeReady) return;
+    if (file) uploadFile(file).catch((error) => showToast(error.message, true));
+  });
   $("#transcribeButton").addEventListener("click", async () => {
     try {
       await saveRecognitionSelection();

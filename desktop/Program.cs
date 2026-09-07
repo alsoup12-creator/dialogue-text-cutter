@@ -64,13 +64,17 @@ internal sealed class MainForm : Form
         Controls.Add(_webView);
         Controls.Add(_loadingPanel);
         _loadingPanel.BringToFront();
-        // WebView's default drop handling hides the real Windows path from the
-        // page and turns a local drop into a browser-style byte upload. Handle
-        // it here instead so the backend can reference the original video.
-        _webView.AllowExternalDrop = false;
+        // The WebView itself fills the form, so it must be an enabled Windows
+        // drop target. Its WinForms events still expose DataFormats.FileDrop,
+        // which lets the backend reference the original path instead of using
+        // the browser's byte-upload path.
+        _webView.AllowExternalDrop = true;
         DragEnter += OnNativeDragEnter;
         DragLeave += OnNativeDragLeave;
         DragDrop += OnNativeDragDrop;
+        _webView.DragEnter += OnNativeDragEnter;
+        _webView.DragLeave += OnNativeDragLeave;
+        _webView.DragDrop += OnNativeDragDrop;
         Shown += async (_, _) => await StartAsync();
         FormClosing += OnFormClosing;
     }
@@ -211,6 +215,7 @@ internal sealed class MainForm : Form
             if (type == "set-native-import-enabled" && document.RootElement.TryGetProperty("enabled", out var enabled))
             {
                 _nativeImportEnabled = enabled.GetBoolean();
+                _webView.AllowExternalDrop = _nativeImportEnabled && !_sourceImportInProgress;
                 return;
             }
             if (type == "pick-native-source-file" && _nativeImportEnabled)
@@ -275,6 +280,7 @@ internal sealed class MainForm : Form
     {
         if (_sourceImportInProgress || _backendUrl is null) return;
         _sourceImportInProgress = true;
+        _webView.AllowExternalDrop = false;
         PostNativeMessage(new { type = "native-source-importing" });
         try
         {
@@ -301,6 +307,7 @@ internal sealed class MainForm : Form
         finally
         {
             _sourceImportInProgress = false;
+            _webView.AllowExternalDrop = _nativeImportEnabled;
         }
     }
 
