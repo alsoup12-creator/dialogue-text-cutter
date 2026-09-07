@@ -31,18 +31,18 @@
 
         <div class="import-card">
           <div class="step-label"><span>01</span> 导入一段对话视频</div>
-          <label class="drop-zone" id="dropZone">
+          <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="选择或拖入视频">
             <input id="fileInput" type="file" accept="video/*,.mkv">
             <span class="upload-icon">↗</span>
-            <strong>选择视频</strong>
-            <small>也可以把文件拖到这里</small>
+            <strong>选择本地视频</strong>
+            <small>也可以把文件拖到这里，不复制原视频</small>
             <em>MP4、MOV、MKV 等视频格式</em>
-          </label>
+          </div>
           <div class="or"><span>或</span></div>
           <form id="pathForm" class="path-form">
-            <label for="pathInput">直接使用电脑里的文件路径</label>
+            <label for="pathInput">手动填写文件路径（备用）</label>
             <div><input id="pathInput" placeholder="例如 D:\视频\访谈.mp4" autocomplete="off"><button class="button dark">打开</button></div>
-            <small>使用路径无需复制大文件，速度更快。</small>
+            <small>项目完成前请不要移动或改名原视频。</small>
           </form>
         </div>
 

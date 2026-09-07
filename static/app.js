@@ -32,6 +32,7 @@ const state = {
   activeJobId: null,
   editedPreviewEnabled: true,
   previewJumping: false,
+  nativeFileBridgeReady: false,
 };
 
 const fillers = ["嗯", "啊", "呃", "那个", "就是说", "然后呢", "怎么说呢", "对吧"];
@@ -81,7 +82,7 @@ function formatDate(value) {
 async function loadConfig() {
   state.config = await api("/api/config");
   const badge = $("#engineBadge");
-  state.restartRequired = Number(state.config.appVersion || 1) < 13;
+  state.restartRequired = Number(state.config.appVersion || 1) < 14;
   if (state.restartRequired) {
     badge.className = "engine-badge error";
     badge.innerHTML = "<i></i>请重启以加载今日升级";
@@ -261,6 +262,7 @@ async function showWelcome(saveFirst = true) {
   state.activeJobId = null;
   $("#welcomeView").classList.remove("hidden");
   $("#editorView").classList.add("hidden");
+  setNativeImportEnabled(true);
   history.replaceState(null, "", location.pathname);
   loadProjects().catch((error) => showToast(error.message, true));
   return true;
@@ -301,6 +303,7 @@ async function confirmDeleteProject(project = state.project) {
 
 async function openProject(id) {
   try {
+    setNativeImportEnabled(false);
     clearTimeout(state.saveTimer);
     clearTimeout(state.subtitleSaveTimer);
     state.saveTimer = null;
@@ -350,6 +353,7 @@ async function openProject(id) {
     }
     if (["running", "queued", "cancelling"].includes(project.activeJob?.state)) monitorJob(project.activeJob.id);
   } catch (error) {
+    if (!state.project) setNativeImportEnabled(true);
     showToast(error.message, true);
   }
 }
@@ -1444,6 +1448,46 @@ async function importFromPath(path) {
   await openProject(project.id);
 }
 
+function nativeDesktopBridge() {
+  const bridge = window.chrome?.webview;
+  return bridge && typeof bridge.postMessage === "function" ? bridge : null;
+}
+
+function setNativeImportEnabled(enabled) {
+  const bridge = nativeDesktopBridge();
+  if (bridge && state.nativeFileBridgeReady) bridge.postMessage({ type: "set-native-import-enabled", enabled });
+}
+
+function requestNativeSourcePicker() {
+  const bridge = nativeDesktopBridge();
+  if (bridge && state.nativeFileBridgeReady) {
+    bridge.postMessage({ type: "pick-native-source-file" });
+    return;
+  }
+  $("#fileInput").click();
+}
+
+function bindNativeDesktopBridge() {
+  const bridge = nativeDesktopBridge();
+  if (!bridge) return;
+  bridge.addEventListener("message", (event) => {
+    const message = event.data || {};
+    if (message.type === "native-bridge-ready") {
+      state.nativeFileBridgeReady = true;
+      setNativeImportEnabled(!$("#welcomeView").classList.contains("hidden"));
+    } else if (message.type === "native-drag-state") {
+      $("#dropZone").classList.toggle("dragging", Boolean(message.active));
+    } else if (message.type === "native-source-importing") {
+      showToast("正在直接打开原视频…");
+    } else if (message.type === "native-source-ready" && message.projectId) {
+      openProject(message.projectId).catch((error) => showToast(error.message, true));
+    } else if (message.type === "native-source-error") {
+      showToast(message.message || "无法打开这个视频文件", true);
+    }
+  });
+  bridge.postMessage({ type: "native-bridge-handshake" });
+}
+
 async function uploadFile(file) {
   const pending = state.project?.upload;
   const resuming = !!pending;
@@ -1455,6 +1499,7 @@ async function uploadFile(file) {
     ? state.project
     : await api("/api/projects", { method: "POST", body: JSON.stringify({ name: file.name.replace(/\.[^.]+$/, "") }) });
   state.project = project;
+  setNativeImportEnabled(false);
   $("#welcomeView").classList.add("hidden");
   $("#editorView").classList.remove("hidden");
   history.replaceState(null, "", `#project=${project.id}`);
@@ -1658,6 +1703,13 @@ function bindEvents() {
     if (file) uploadFile(file).catch((error) => showToast(error.message, true));
   });
   const dropZone = $("#dropZone");
+  dropZone.addEventListener("click", requestNativeSourcePicker);
+  dropZone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      requestNativeSourcePicker();
+    }
+  });
   for (const name of ["dragenter", "dragover"]) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.add("dragging"); });
   for (const name of ["dragleave", "drop"]) dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove("dragging"); });
   dropZone.addEventListener("drop", (event) => { const file = event.dataTransfer.files[0]; if (file) uploadFile(file).catch((error) => showToast(error.message, true)); });
@@ -1798,6 +1850,7 @@ function bindEvents() {
 }
 
 async function init() {
+  bindNativeDesktopBridge();
   bindEvents();
   try {
     await Promise.all([loadConfig(), loadProjects()]);

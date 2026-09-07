@@ -12,6 +12,15 @@ class PersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             self.assertEqual(app.read_json(Path(folder), {"segments": []}), {"segments": []})
 
+    def test_upload_status_uses_actual_partial_file_size_after_metadata_lag(self):
+        with tempfile.TemporaryDirectory() as folder:
+            partial = Path(folder) / "source.mp4.uploading"
+            partial.write_bytes(b"x" * 8192)
+            project = {"upload": {"path": str(partial), "received": 0}}
+            visible = app.public_project(project)
+        self.assertEqual(visible["upload"]["received"], 8192)
+        self.assertEqual(project["upload"]["received"], 0)
+
 
 class RecognitionConfigurationTests(unittest.TestCase):
     def make_model(self, root: Path, name: str, size: int = 16) -> Path:

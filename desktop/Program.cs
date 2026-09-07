@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -39,10 +41,13 @@ internal sealed class MainForm : Form
     };
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
+    private readonly HttpClient _sourceImportHttp = new() { Timeout = TimeSpan.FromSeconds(20) };
     private Process? _backend;
     private string? _backendUrl;
     private string? _desktopToken;
     private string? _appRoot;
+    private bool _nativeImportEnabled = true;
+    private bool _sourceImportInProgress;
     private bool _allowClose;
     private bool _closeInProgress;
 
@@ -53,11 +58,19 @@ internal sealed class MainForm : Form
         Width = 1500;
         Height = 920;
         MinimumSize = new Size(1040, 700);
+        AllowDrop = true;
         BackColor = _loadingPanel.BackColor;
         _loadingPanel.Controls.Add(_loadingLabel);
         Controls.Add(_webView);
         Controls.Add(_loadingPanel);
         _loadingPanel.BringToFront();
+        // WebView's default drop handling hides the real Windows path from the
+        // page and turns a local drop into a browser-style byte upload. Handle
+        // it here instead so the backend can reference the original video.
+        _webView.AllowExternalDrop = false;
+        DragEnter += OnNativeDragEnter;
+        DragLeave += OnNativeDragLeave;
+        DragDrop += OnNativeDragDrop;
         Shown += async (_, _) => await StartAsync();
         FormClosing += OnFormClosing;
     }
@@ -172,6 +185,7 @@ internal sealed class MainForm : Form
         settings.IsZoomControlEnabled = false;
         settings.IsGeneralAutofillEnabled = false;
         settings.IsPasswordAutosaveEnabled = false;
+        _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
         _webView.CoreWebView2.NewWindowRequested += (_, eventArgs) => eventArgs.Handled = true;
         _webView.CoreWebView2.NavigationStarting += (_, eventArgs) =>
         {
@@ -179,6 +193,142 @@ internal sealed class MainForm : Form
                 eventArgs.Cancel = true;
         };
         _webView.Source = new Uri(url);
+    }
+
+    private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs eventArgs)
+    {
+        if (_backendUrl is null || !eventArgs.Source.StartsWith(_backendUrl, StringComparison.OrdinalIgnoreCase)) return;
+        try
+        {
+            using var document = JsonDocument.Parse(eventArgs.WebMessageAsJson);
+            if (!document.RootElement.TryGetProperty("type", out var typeValue)) return;
+            var type = typeValue.GetString();
+            if (type == "native-bridge-handshake")
+            {
+                PostNativeMessage(new { type = "native-bridge-ready" });
+                return;
+            }
+            if (type == "set-native-import-enabled" && document.RootElement.TryGetProperty("enabled", out var enabled))
+            {
+                _nativeImportEnabled = enabled.GetBoolean();
+                return;
+            }
+            if (type == "pick-native-source-file" && _nativeImportEnabled)
+            {
+                BeginInvoke(PickNativeSourceFile);
+            }
+        }
+        catch (JsonException)
+        {
+            // Ignore malformed page messages. The page itself is restricted to the local backend URL.
+        }
+    }
+
+    private void PickNativeSourceFile()
+    {
+        if (_sourceImportInProgress) return;
+        using var picker = new OpenFileDialog
+        {
+            Title = "选择要剪辑的视频",
+            Filter = "视频文件|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.ts;*.mts;*.m2ts;*.wmv;*.flv;*.3gp|所有文件|*.*",
+            CheckFileExists = true,
+            Multiselect = false,
+        };
+        if (picker.ShowDialog(this) == DialogResult.OK)
+            _ = ImportNativeSourceAsync(picker.FileName);
+    }
+
+    private void OnNativeDragEnter(object? sender, DragEventArgs eventArgs)
+    {
+        if (!_nativeImportEnabled || _sourceImportInProgress || !TryGetDroppedVideo(eventArgs.Data, out _))
+        {
+            eventArgs.Effect = DragDropEffects.None;
+            return;
+        }
+        eventArgs.Effect = DragDropEffects.Copy;
+        PostNativeMessage(new { type = "native-drag-state", active = true });
+    }
+
+    private void OnNativeDragLeave(object? sender, EventArgs eventArgs)
+    {
+        PostNativeMessage(new { type = "native-drag-state", active = false });
+    }
+
+    private void OnNativeDragDrop(object? sender, DragEventArgs eventArgs)
+    {
+        PostNativeMessage(new { type = "native-drag-state", active = false });
+        if (_nativeImportEnabled && !_sourceImportInProgress && TryGetDroppedVideo(eventArgs.Data, out var sourcePath))
+            _ = ImportNativeSourceAsync(sourcePath);
+    }
+
+    private static bool TryGetDroppedVideo(IDataObject? data, out string sourcePath)
+    {
+        sourcePath = "";
+        if (data?.GetDataPresent(DataFormats.FileDrop) != true) return false;
+        if (data.GetData(DataFormats.FileDrop) is not string[] files || files.Length != 1) return false;
+        if (!File.Exists(files[0])) return false;
+        sourcePath = files[0];
+        return true;
+    }
+
+    private async Task ImportNativeSourceAsync(string sourcePath)
+    {
+        if (_sourceImportInProgress || _backendUrl is null) return;
+        _sourceImportInProgress = true;
+        PostNativeMessage(new { type = "native-source-importing" });
+        try
+        {
+            if (!File.Exists(sourcePath)) throw new FileNotFoundException("找不到拖入的视频文件。", sourcePath);
+            using var request = new HttpRequestMessage(HttpMethod.Post, _backendUrl + "/api/projects/from-path")
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new { path = sourcePath }), Encoding.UTF8, "application/json"),
+            };
+            using var response = await _sourceImportHttp.SendAsync(request);
+            var body = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException(ReadApiError(body, "无法打开这个视频文件。"));
+            using var result = JsonDocument.Parse(body);
+            if (!result.RootElement.TryGetProperty("id", out var projectId) || string.IsNullOrWhiteSpace(projectId.GetString()))
+                throw new InvalidOperationException("视频已打开，但没有获得项目编号。请重试。");
+            _nativeImportEnabled = false;
+            PostNativeMessage(new { type = "native-source-ready", projectId = projectId.GetString() });
+        }
+        catch (Exception exception)
+        {
+            AppendLog("原生视频导入失败：" + exception.Message);
+            PostNativeMessage(new { type = "native-source-error", message = exception.Message });
+        }
+        finally
+        {
+            _sourceImportInProgress = false;
+        }
+    }
+
+    private static string ReadApiError(string body, string fallback)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.TryGetProperty("error", out var error) && !string.IsNullOrWhiteSpace(error.GetString())
+                ? error.GetString()!
+                : fallback;
+        }
+        catch (JsonException)
+        {
+            return fallback;
+        }
+    }
+
+    private void PostNativeMessage(object message)
+    {
+        try
+        {
+            _webView.CoreWebView2?.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+        }
+        catch (InvalidOperationException)
+        {
+            // The page may still be starting or already shutting down.
+        }
     }
 
     private async void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
@@ -239,6 +389,7 @@ internal sealed class MainForm : Form
         {
             _backend.Dispose();
             _http.Dispose();
+            _sourceImportHttp.Dispose();
         }
     }
 

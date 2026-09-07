@@ -117,6 +117,16 @@ def public_project(project: dict[str, Any]) -> dict[str, Any]:
         source = dict(source)
         source["available"] = Path(source["path"]).is_file()
         result["source"] = source
+    upload = result.get("upload") or {}
+    if upload.get("path"):
+        # A completed disk write can survive a transient metadata-save error.
+        # Report the real byte count so a browser upload resumes from the file,
+        # rather than retrying forever with a stale JSON offset.
+        upload = dict(upload)
+        partial = Path(upload["path"])
+        if partial.is_file():
+            upload["received"] = partial.stat().st_size
+        result["upload"] = upload
     job_id = result.get("activeJobId")
     if job_id:
         with JOBS_LOCK:
@@ -451,7 +461,7 @@ def tool_config() -> dict[str, Any]:
     selected_default = default_model_id(models)
     large_v3 = DEFAULT_MODEL_DIR / "faster-whisper-large-v3" / "model.bin"
     return {
-        "appVersion": 13,
+        "appVersion": 14,
         "whisper": str(whisper) if whisper else None,
         "ffmpeg": str(ffmpeg) if ffmpeg else None,
         "ffprobe": str(ffprobe) if ffprobe else None,
@@ -1872,7 +1882,7 @@ def main() -> None:
         with urllib.request.urlopen(f"{url}/api/config", timeout=0.5) as response:
             if response.status == 200:
                 running_config = json.loads(response.read().decode("utf-8"))
-                if int(running_config.get("appVersion", 1)) >= 13:
+                if int(running_config.get("appVersion", 1)) >= 14:
                     print(f"对白文字剪辑器已经在运行：{url}")
                     if args.open and not os.environ.get("TEXTCUT_SKIP_BROWSER"):
                         webbrowser.open(url)
