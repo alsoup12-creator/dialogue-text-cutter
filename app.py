@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -131,7 +132,7 @@ def public_project(project: dict[str, Any]) -> dict[str, Any]:
     if job_id:
         with JOBS_LOCK:
             job = JOBS.get(job_id)
-            result["activeJob"] = (dict(job) | {"log": list(job.get("log", []))}) if job else None
+            result["activeJob"] = job_snapshot(job) if job else None
     return result
 
 
@@ -461,7 +462,7 @@ def tool_config() -> dict[str, Any]:
     selected_default = default_model_id(models)
     large_v3 = DEFAULT_MODEL_DIR / "faster-whisper-large-v3" / "model.bin"
     return {
-        "appVersion": 14,
+        "appVersion": 15,
         "whisper": str(whisper) if whisper else None,
         "ffmpeg": str(ffmpeg) if ffmpeg else None,
         "ffprobe": str(ffprobe) if ffprobe else None,
@@ -731,6 +732,16 @@ def set_job(project_id: str, kind: str, state: str, **extra: Any) -> dict[str, A
         return dict(job) | {"log": list(job.get("log", []))}
 
 
+def job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
+    result = dict(job) | {"log": list(job.get("log", []))}
+    advanced_at = job.get("lastAdvanceAt")
+    result["stalledSeconds"] = (
+        max(0, int(time.time() - advanced_at))
+        if advanced_at and job.get("state") == "running" else 0
+    )
+    return result
+
+
 def append_job_log(job_id: str, text: str) -> None:
     clean = text.rstrip()
     if not clean:
@@ -868,7 +879,12 @@ def progress_seconds(value: str) -> float | None:
     return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
 
 
-def run_logged(command: list[str], job_id: str, cwd: Path | None = None, expected_duration: float | None = None) -> None:
+def run_logged(
+    command: list[str], job_id: str, cwd: Path | None = None,
+    expected_duration: float | None = None, *, progress_start: float = 0,
+    progress_span: float = 98, processed_offset: float = 0,
+    total_duration: float | None = None,
+) -> None:
     append_job_log(job_id, "正在启动本地处理工具…")
     process = subprocess.Popen(
         command,
@@ -883,6 +899,9 @@ def run_logged(command: list[str], job_id: str, cwd: Path | None = None, expecte
     with JOBS_LOCK:
         RUNNING_PROCESSES[job_id] = process
         cancel_requested = bool(JOBS.get(job_id, {}).get("cancelRequested"))
+        if expected_duration and job_id in JOBS:
+            JOBS[job_id]["lastAdvanceAt"] = time.time()
+    highest_processed = 0.0
     if cancel_requested:
         terminate_process(process)
     try:
@@ -903,8 +922,15 @@ def run_logged(command: list[str], job_id: str, cwd: Path | None = None, expecte
             if expected_duration and line.startswith("out_time=") and project_id and kind:
                 processed = progress_seconds(line.split("=", 1)[1])
                 if processed is not None:
-                    percent = min(98, max(1, processed / expected_duration * 100))
-                    set_job(project_id, kind, "running", jobId=job_id, progress=percent, processedSeconds=round(processed, 1), expectedSeconds=round(expected_duration, 1))
+                    processed = min(expected_duration, max(highest_processed, processed))
+                    advance = {}
+                    if processed > highest_processed + 0.001:
+                        highest_processed = processed
+                        advance["lastAdvanceAt"] = time.time()
+                    percent = min(98, max(1, progress_start + processed / expected_duration * progress_span))
+                    set_job(project_id, kind, "running", jobId=job_id, progress=percent,
+                            processedSeconds=round(processed_offset + processed, 1),
+                            expectedSeconds=round(total_duration or expected_duration, 1), **advance)
         code = process.wait()
     finally:
         if process.stdout:
@@ -1427,105 +1453,8 @@ def video_encoder_args(use_nvenc: bool, preview: bool) -> list[str]:
 
 
 def render_worker(project_id: str, job_id: str, preview: bool) -> None:
-    project = load_project(project_id)
-    render_revision = int(project.get("editRevision", 0))
-    source = source_for(project)
-    transcript_info = project.get("transcript") or {}
-    transcript = read_json(Path(transcript_info.get("path", "")))
-    if not transcript:
-        raise RuntimeError("请先完成字幕识别")
-    segments = transcript["segments"]
-    clips = compute_clips(segments, project["edit"], (project.get("source") or {}).get("duration"))
-    if not clips:
-        raise RuntimeError("没有保留任何对话，无法生成视频")
-    timeline_duration = round(sum(clip.duration for clip in clips), 3)
-    ffmpeg = tool_config().get("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("没有找到 FFmpeg")
-    output_dir = project_dir(project_id) / "outputs"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    kind = "preview" if preview else "final"
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    base_name = f"{'预览' if preview else '成片'}-{stamp}"
-    output = output_dir / f"{base_name}.mp4"
-    partial = output_dir / f"{base_name}.partial.mp4"
-    subtitle = output_dir / f"{base_name}.srt"
-    filter_path = output_dir / f"{base_name}-filter.txt"
-    # Skip material before the first retained clip. This is especially important
-    # when a large opening section was deleted: FFmpeg no longer decodes minutes
-    # of frames that can never reach the output.
-    input_offset = clips[0].source_start
-    filter_path.write_text(make_filter_script(clips, preview, input_offset), encoding="utf-8")
-    use_nvenc = nvenc_available(ffmpeg)
-    encoder_name = "NVIDIA NVENC GPU" if use_nvenc else "libx264 CPU（未检测到可用的 NVENC）"
-    set_job(project_id, "preview" if preview else "render", "running", jobId=job_id, encoder=encoder_name)
-    append_job_log(job_id, f"视频编码：{encoder_name}")
-
-    def render_command(nvenc: bool) -> list[str]:
-        input_args = ["-ss", f"{input_offset:.3f}"]
-        if nvenc:
-            input_args = ["-hwaccel", "cuda", *input_args]
-        return [
-            ffmpeg, "-hide_banner", "-y", *input_args, "-i", str(source),
-            "-filter_complex_script", str(filter_path),
-            "-map", "[outv]", "-map", "[outa]",
-            *video_encoder_args(nvenc, preview),
-            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
-            "-progress", "pipe:1", "-nostats", str(partial),
-        ]
-
-    try:
-        run_logged(render_command(use_nvenc), job_id, output_dir, timeline_duration)
-    except JobCancelled:
-        partial.unlink(missing_ok=True)
-        raise
-    except RuntimeError:
-        if not use_nvenc:
-            partial.unlink(missing_ok=True)
-            raise
-        append_job_log(job_id, "GPU 编码未能完成，正在自动切换到 CPU 重试。")
-        set_job(project_id, "preview" if preview else "render", "running", jobId=job_id, encoder="libx264 CPU（GPU 自动回退）")
-        partial.unlink(missing_ok=True)
-        try:
-            run_logged(render_command(False), job_id, output_dir, timeline_duration)
-        except Exception:
-            partial.unlink(missing_ok=True)
-            raise
-        encoder_name = "libx264 CPU（GPU 自动回退）"
-    try:
-        ensure_job_not_cancelled(job_id)
-        rendered = probe_media(partial)
-        rendered_duration = float(rendered.get("duration") or 0)
-        allowed_difference = max(1.0, timeline_duration * 0.01)
-        if not partial.is_file() or partial.stat().st_size <= 0 or not rendered.get("width") or abs(rendered_duration - timeline_duration) > allowed_difference:
-            raise RuntimeError("导出文件完整性检查未通过，旧成片没有被覆盖")
-        ensure_job_not_cancelled(job_id)
-        os.replace(partial, output)
-    except Exception:
-        partial.unlink(missing_ok=True)
-        raise
-    write_retimed_srt(subtitle, segments, project["edit"], clips, project.get("subtitleEdits"))
-    timeline = {
-        "clips": [clip.__dict__ | {"duration": round(clip.duration, 3)} for clip in clips],
-        "duration": timeline_duration,
-        "generatedAt": now_iso(),
-    }
-    atomic_write_json(output_dir / f"{kind}-timeline.json", timeline)
-    with project_lock(project_id):
-        project = load_project(project_id)
-        project.setdefault("outputs", {})[kind] = {
-            "videoPath": str(output),
-            "subtitlePath": str(subtitle),
-            "duration": timeline["duration"],
-            "clipCount": len(clips),
-            "encoder": encoder_name,
-            "fileName": output.name,
-            "editRevision": render_revision,
-            "generatedAt": timeline["generatedAt"],
-        }
-        project["status"] = "预览已生成" if preview else "成片已生成"
-        project["activeJobId"] = None
-        save_project(project)
+    from render_pipeline import render
+    render(project_id, job_id, preview, sys.modules[__name__])
 
 
 class ApiError(Exception):
@@ -1606,7 +1535,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = JOBS.get(parts[2])
             if not job:
                 raise ApiError(404, "找不到任务")
-            return self.send_json(dict(job) | {"log": list(job.get("log", []))})
+            return self.send_json(job_snapshot(job))
         return self.send_static()
 
     def send_static(self) -> None:

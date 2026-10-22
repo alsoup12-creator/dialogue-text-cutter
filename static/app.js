@@ -1549,16 +1549,30 @@ function taskName(kind) {
   return ({ transcribe: "正在识别对白", preview: "正在生成预览", render: "正在导出成片", upload: "正在导入视频" })[kind] || "正在处理";
 }
 
+function taskDetailText(job) {
+  if (job.error) return job.error;
+  const details = [];
+  if (job.phase) details.push(job.phase);
+  if (job.processedSeconds != null && job.expectedSeconds != null
+      && Number.isFinite(Number(job.processedSeconds)) && Number.isFinite(Number(job.expectedSeconds))) {
+    details.push(`已处理 ${formatDuration(job.processedSeconds, true)} / ${formatDuration(job.expectedSeconds, true)}`);
+  }
+  if (Number(job.cachedBatches) > 0) details.push(`已复用 ${job.cachedBatches} 段`);
+  if (job.state === "running" && Number(job.stalledSeconds) >= 30) {
+    details.push(`已 ${formatDuration(job.stalledSeconds, true)} 没有新增画面，可取消后重试，完成的分段会保留`);
+  }
+  return details.join(" · ") || (job.state === "running"
+    ? "可以继续浏览页面，请不要关闭启动窗口" : "任务准备中");
+}
+
 function showTask(job) {
   const panel = $("#taskPanel");
   panel.classList.remove("hidden", "done", "failed");
   panel.classList.toggle("done", job.state === "completed");
   panel.classList.toggle("failed", job.state === "failed");
+  panel.classList.toggle("stalled", job.state === "running" && Number(job.stalledSeconds) >= 30);
   $("#taskTitle").textContent = job.state === "cancelling" ? "正在取消任务" : job.state === "cancelled" ? "任务已取消" : job.state === "paused" ? "导入已暂停" : job.state === "failed" ? "处理没有完成" : job.state === "completed" ? "处理完成" : taskName(job.kind);
-  const progressDetail = job.processedSeconds != null && job.expectedSeconds != null && Number.isFinite(Number(job.processedSeconds)) && Number.isFinite(Number(job.expectedSeconds))
-    ? `${job.phase ? `${job.phase} · ` : ""}已处理 ${formatDuration(job.processedSeconds, true)} / ${formatDuration(job.expectedSeconds, true)}`
-    : null;
-  $("#taskDetail").textContent = job.error || progressDetail || job.phase || (job.state === "running" ? `${job.encoder ? `${job.encoder} · ` : ""}可以继续浏览页面，请不要关闭启动窗口` : "任务准备中");
+  $("#taskDetail").textContent = taskDetailText(job);
   $("#taskProgress").style.width = `${Math.max(2, Number(job.progress || 0))}%`;
   $("#taskLog").textContent = (job.log || []).join("\n");
   $("#resumeUploadButton").classList.toggle("hidden", !(job.kind === "upload" && job.state === "paused"));
@@ -1568,7 +1582,7 @@ function showTask(job) {
 
 function hideTask() {
   $("#taskPanel").classList.add("hidden");
-  $("#taskPanel").classList.remove("done", "failed");
+  $("#taskPanel").classList.remove("done", "failed", "stalled");
   $("#taskLog").classList.add("hidden");
 }
 

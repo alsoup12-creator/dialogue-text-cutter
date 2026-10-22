@@ -35,6 +35,7 @@
 - 字幕编辑支持查找下一个、替换当前和全部替换
 - 自动保存项目；关闭桌面窗口时会先刷新待保存修改，再安全停止后台任务
 - 生成低清预览，并使用 NVIDIA NVENC 或 CPU 导出 H.264 MP4
+- 精细剪辑自动分批导出，显示分段进度；重试或再次修改时复用未变化的分段
 - 每次输出同时生成重新计时的独立 SRT，不把字幕烧录进画面
 - 项目删除后先进入本地回收区，可恢复或永久清理
 
@@ -82,7 +83,7 @@ Subtitle Edit 官方的[语音转文字说明](https://github.com/SubtitleEdit/s
 .\构建桌面版.ps1
 ```
 
-随后双击 `desktop\publish\对白剪辑台.exe`。桌面 EXE 依赖项目根目录中的 `app.py` 和 `static`，不能只复制一个 EXE 使用。
+随后双击 `desktop\publish\对白剪辑台.exe`。桌面 EXE 依赖项目根目录中的 `app.py`、`render_pipeline.py` 和 `static`，不能只复制一个 EXE 使用。
 
 ## 基本流程
 
@@ -101,12 +102,15 @@ Subtitle Edit 官方的[语音转文字说明](https://github.com/SubtitleEdit/s
 
 成片与字幕位于项目目录下的 `outputs`。`.data` 包含视频路径、字幕、剪辑记录和可能复制进来的媒体文件，已经被 Git 忽略，发布仓库时不要手动添加。
 
+导出的已完成分段保存在各项目的 `cache/render-v1`，用于取消后重试和后续编辑的复用；导出快照保存在 `.working/render-任务编号/snapshot.json`。视频源文件变化、预览质量变化或编码方式变化时，会重新生成相应分段。导出进度 30 秒没有新增画面时会给出提示，完成的分段仍会保留。
+
 ## 开发验证
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py"
-python -m py_compile app.py
+python -m py_compile app.py render_pipeline.py
 node --check static\app.js
+node --test tests/test_task_status.js
 .\构建桌面版.ps1
 ```
 
